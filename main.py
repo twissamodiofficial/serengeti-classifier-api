@@ -5,8 +5,9 @@ import numpy as np
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from torchvision import models, transforms
-
+from gradcam import GradCAM, overlay_heatmap
 from utils.preprocessing_utils import preprocess_image
+import base64
 
 app = FastAPI()
 
@@ -28,6 +29,7 @@ model.fc = nn.Linear(model.fc.in_features, len(classes))
 model.load_state_dict(checkpoint['model_state_dict'])
 model.to(device)
 model.eval()
+grad_cam = GradCAM(model, model.layer4[-1])
 
 # Same normalization as training 
 imagenet_mean = [0.485, 0.456, 0.406]
@@ -59,12 +61,22 @@ async def predict(file: UploadFile = File(...)):
     processed_rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
 
     tensor = normalize(processed_rgb).unsqueeze(0).to(device)
-
+    '''
     with torch.no_grad():
         outputs = model(tensor)
         probs = torch.softmax(outputs, dim=1)[0]
+    '''
+
+    cam, class_idx, outputs = grad_cam.generate(tensor)
+    probs = torch.softmax(outputs, dim=1)[0]
 
     top3_probs, top3_idx = torch.topk(probs, 3)
+
+    overlay = overlay_heatmap(processed, cam)
+    success, encoded_bytes = cv2.imencode('.jpg', overlay)
+    base64_bytes = None
+    if success:
+        base64_bytes = base64.b64encode(encoded_bytes).decode('utf-8')
 
     results = [
         {"species": classes[idx], "confidence": round(prob.item() * 100, 2)}
@@ -73,4 +85,6 @@ async def predict(file: UploadFile = File(...)):
 
     return {
         "predictions": results,
+        "overlay": base64_bytes,
+        "predicted_class": classes[class_idx]
     }
